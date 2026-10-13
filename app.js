@@ -195,7 +195,7 @@ function viewHome() {
     <div class="meta">${esc(dept(t.department_key))}${t.last_error && t.status !== "done" ? `・${esc(t.last_error.slice(0, 100))}` : ""}</div></div>`;
 
   return (
-    card("要対応", todoCount ? todo : `<div class="empty">今、社長がやることはありません</div>`, todoCount) +
+    card("要対応", todoCount ? todo : `<div class="empty">今、ボスがやることはありません</div>`, todoCount) +
     card("稼働状況", statusBody) +
     card("費用（AI）", costBody + `<div class="small"><a class="link" href="#cost">くわしく見る →</a></div>`) +
     card("進行中・未着手の仕事", list(data.openTasks, taskItem), data.openTasks.length) +
@@ -229,7 +229,7 @@ async function viewArtifact(id) {
 }
 
 function viewHistory(sub = "reports") {
-  const seg = [["reports", "朝の報告"], ["decisions", "CEOの判断"], ["instructions", "社長の指示"], ["tasks", "仕事"], ["notices", "通知"], ["policy", "方針・事業"]];
+  const seg = [["reports", "朝の報告"], ["decisions", "CEOの判断"], ["instructions", "ボスの指示"], ["tasks", "仕事"], ["notices", "通知"], ["policy", "方針・事業"]];
   const nav = `<div class="segment">${seg.map(([k, l]) => `<a href="#history/${k}" class="${k === sub ? "active" : ""}">${l}</a>`).join("")}</div>`;
   let body = "";
   if (sub === "reports") {
@@ -237,7 +237,7 @@ function viewHistory(sub = "reports") {
   } else if (sub === "decisions") {
     body = card("CEOが決めたこと", list(data.decisions, (d) => `<div class="item">${esc(d.summary)}<div class="meta">${fmt(d.created_at)}・理由：${esc(d.rationale)}</div></div>`));
   } else if (sub === "instructions") {
-    body = card("社長の指示とCEOの理解", list(data.instructions, (i) => `<details class="item"><summary><span class="pill">${INSTR_STATUS[i.status] ?? i.status}</span>${fmt(i.created_at)} ${esc(i.body.slice(0, 40))}…</summary>
+    body = card("ボスの指示とCEOの理解", list(data.instructions, (i) => `<details class="item"><summary><span class="pill">${INSTR_STATUS[i.status] ?? i.status}</span>${fmt(i.created_at)} ${esc(i.body.slice(0, 40))}…</summary>
       <pre class="report">${esc(i.body)}</pre>${i.ceo_interpretation ? `<div class="md"><p><b>CEOの理解</b></p>${md(i.ceo_interpretation)}</div>` : ""}</details>`));
   } else if (sub === "tasks") {
     body = card("最近の仕事", list(data.recentTasks, (t) => `<div class="item"><span class="pill">${TASK_STATUS[t.status] ?? t.status}</span>${esc(t.title)}
