@@ -76,6 +76,11 @@ async function load() {
     rows(db.from("businesses").select("name,description,kpi,status"), "businesses"),
     rows(db.from("policies").select("title,body,version,effective_from").is("effective_to", null).order("effective_from"), "policies"),
   ]);
+  const expired = await rows(db.from("approvals").select("id,proposal_id,expires_at").eq("status", "expired")
+    .gte("expires_at", new Date(now.getTime() - 7 * 86400e3).toISOString()).order("expires_at", { ascending: false }), "approvals.expired");
+  const expiredProposals = expired.length
+    ? await rows(db.from("action_proposals").select("id,description,category").in("id", expired.map((a) => a.proposal_id)), "action_proposals.expired")
+    : [];
   let scheduler = null;
   try {
     const { data: s } = await db.rpc("dashboard_scheduler");
@@ -87,7 +92,8 @@ async function load() {
   const deptName = Object.fromEntries(depts.map((d) => [d.key, d.name]));
   const taskById = Object.fromEntries(recentTasks.map((t) => [t.id, t]));
   data = { now, settings, st, usage, deptName, taskById, openTasks, recentTasks, proposals, approvals, questions,
-    instructions, notifications, artifacts, reports, decisions, businesses, policies, scheduler };
+    instructions, notifications, artifacts, reports, decisions, businesses, policies, scheduler,
+    expired: expired.map((a) => ({ a, p: expiredProposals.find((p) => p.id === a.proposal_id) })).filter((x) => x.p) };
   $("#updated").textContent = `最終更新 ${fmt(now.toISOString())}`;
 }
 
@@ -148,14 +154,27 @@ function viewHome() {
   // 「確認待ち」の指示は、CEOの質問（owner_questions）として別に出るので、ここでは未処理のものだけ
   const waitingInstr = data.instructions.filter((i) => i.status === "new");
   const undelivered = data.notifications.filter((n) => !n.delivered && !n.reported);
+  const daysLeft = (iso) => (new Date(iso).getTime() - now.getTime()) / 86400e3;
+  const approvalBody =
+    `<div class="row"><span>承認待ち</span><span>${pending.length}件</span></div>` +
+    pending.map(({ p, a }) => {
+      const d = daysLeft(a.expires_at);
+      const urgent = d <= 2;
+      return `<div class="item"><span class="pill">${p.category === "B" ? "承認" : "判断"}</span>${esc(p.description)}
+        <div class="meta${urgent ? " urgent" : ""}">${urgent ? `あと${Math.max(0, Math.ceil(d))}日で期限切れ（${fmt(a.expires_at)}）` : `期限 ${fmt(a.expires_at)}`}・LINEの「承認一覧」から操作できます</div></div>`;
+    }).join("") +
+    (data.expired.length
+      ? `<div class="subhead">見逃して期限切れになったもの（直近7日）</div>` +
+        data.expired.map(({ p, a }) => `<div class="item"><span class="pill">期限切れ</span>${esc(p.description)}
+          <div class="meta">${fmt(a.expires_at)} に期限切れ・必要ならLINEでCEOに「もう一度提案して」と送ってください</div></div>`).join("")
+      : `<div class="small muted">見逃して期限切れになったもの（直近7日）：なし</div>`);
+
   const todo =
-    list(pending, ({ p, a }) => `<div class="item"><span class="pill">${p.category === "B" ? "承認" : "判断"}</span>${esc(p.description)}
-      <div class="meta">期限 ${fmt(a.expires_at)}・LINEの「承認一覧」から操作できます</div></div>`, "") +
     list(data.questions, (q) => `<div class="item"><span class="pill">質問</span>${esc(q.body)}<div class="meta">${fmt(q.created_at)}</div></div>`, "") +
     list(waitingInstr, (i) => `<div class="item"><span class="pill">${INSTR_STATUS[i.status]}</span>${esc(i.body.slice(0, 120))}${i.body.length > 120 ? "…" : ""}
       <div class="meta">${fmt(i.created_at)}${i.status === "new" ? "・次の定期処理でCEOが読みます" : ""}</div></div>`, "") +
     list(undelivered, (n) => `<div class="item"><span class="pill">未配信の通知</span>${esc(n.body.slice(0, 160))}<div class="meta">${fmt(n.created_at)}</div></div>`, "");
-  const todoCount = pending.length + data.questions.length + waitingInstr.length + undelivered.length;
+  const todoCount = data.questions.length + waitingInstr.length + undelivered.length;
 
   // 稼働状況
   let status;
@@ -195,7 +214,8 @@ function viewHome() {
     <div class="meta">${esc(dept(t.department_key))}${t.last_error && t.status !== "done" ? `・${esc(t.last_error.slice(0, 100))}` : ""}</div></div>`;
 
   return (
-    card("要対応", todoCount ? todo : `<div class="empty">今、ボスがやることはありません</div>`, todoCount) +
+    card("承認", approvalBody) +
+    card("要対応（質問・指示・通知）", todoCount ? todo : `<div class="empty">今、ボスがやることはありません</div>`, todoCount) +
     card("稼働状況", statusBody) +
     card("費用（AI）", costBody + `<div class="small"><a class="link" href="#cost">くわしく見る →</a></div>`) +
     card("進行中・未着手の仕事", list(data.openTasks, taskItem), data.openTasks.length) +
