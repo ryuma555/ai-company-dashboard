@@ -81,6 +81,10 @@ async function load() {
   const expiredProposals = expired.length
     ? await rows(db.from("action_proposals").select("id,description,category").in("id", expired.map((a) => a.proposal_id)), "action_proposals.expired")
     : [];
+  let productionUpdates = [];
+  try {
+    productionUpdates = await rows(db.from("production_updates").select("body,created_at").order("created_at", { ascending: false }).limit(30), "production_updates");
+  } catch { /* 表がまだなくても他は見せる */ }
   let scheduler = null;
   try {
     const { data: s } = await db.rpc("dashboard_scheduler");
@@ -93,6 +97,7 @@ async function load() {
   const taskById = Object.fromEntries(recentTasks.map((t) => [t.id, t]));
   data = { now, settings, st, usage, deptName, taskById, openTasks, recentTasks, proposals, approvals, questions,
     instructions, notifications, artifacts, reports, decisions, businesses, policies, scheduler,
+    productionUpdates,
     expired: expired.map((a) => ({ a, p: expiredProposals.find((p) => p.id === a.proposal_id) })).filter((x) => x.p) };
   $("#updated").textContent = `最終更新 ${fmt(now.toISOString())}`;
 }
@@ -249,7 +254,7 @@ async function viewArtifact(id) {
 }
 
 function viewHistory(sub = "reports") {
-  const seg = [["reports", "朝の報告"], ["decisions", "CEOの判断"], ["instructions", "ボスの指示"], ["tasks", "仕事"], ["notices", "通知"], ["policy", "方針・事業"]];
+  const seg = [["reports", "朝の報告"], ["decisions", "CEOの判断"], ["instructions", "ボスの指示"], ["tasks", "仕事"], ["notices", "通知"], ["production", "制作担当"], ["policy", "方針・事業"]];
   const nav = `<div class="segment">${seg.map(([k, l]) => `<a href="#history/${k}" class="${k === sub ? "active" : ""}">${l}</a>`).join("")}</div>`;
   let body = "";
   if (sub === "reports") {
@@ -264,6 +269,8 @@ function viewHistory(sub = "reports") {
       <div class="meta">${fmt(t.created_at)}・${esc(dept(t.department_key))}${t.last_error ? `・${esc(t.last_error.slice(0, 140))}` : ""}</div></div>`));
   } else if (sub === "notices") {
     body = card("LINEへの通知", list(data.notifications, (n) => `<details class="item"><summary><span class="pill">${n.kind === "alert" ? "お知らせ" : "CEOの返信"}</span>${fmt(n.created_at)}${n.delivered ? "" : "（未配信）"}</summary><pre class="report">${esc(n.body)}</pre></details>`));
+  } else if (sub === "production") {
+    body = card("制作担当からの報告（CEOに共有済み）", list(data.productionUpdates, (u) => `<div class="item">${esc(u.body)}<div class="meta">${fmt(u.created_at)}</div></div>`, "まだありません"));
   } else if (sub === "policy") {
     body =
       card("事業", list(data.businesses, (b) => `<details class="item"><summary>${esc(b.name)}（${b.status === "active" ? "進行中" : esc(b.status)}）</summary><pre class="report">${esc(b.description)}\n\n目標：${esc(b.kpi)}</pre></details>`)) +
