@@ -93,7 +93,7 @@ async function load() {
     productionUpdates = await rows(db.from("production_updates").select("body,created_at").order("created_at", { ascending: false }).limit(30), "production_updates");
   } catch { /* 表がまだなくても他は見せる */ }
   // スマホ代ラボ（Threads事業部）。表がまだなくても他は見せる
-  let threads = { drafts: [], posted: [], metrics: [], facts: [], a8: [] };
+  let threads = { drafts: [], posted: [], metrics: [], facts: [], a8: [], changes: [] };
   try {
     const twoWeeks = jstDate(new Date(now.getTime() - 14 * 86400e3));
     const [drafts, facts, a8] = await Promise.all([
@@ -105,7 +105,9 @@ async function load() {
     const metrics = posted.length
       ? await rows(db.from("threads_metrics").select("draft_id,age_days,views,likes,replies,reposts,quotes,shares").in("draft_id", posted.map((d) => d.id)), "threads_metrics")
       : [];
-    threads = { drafts, posted, metrics, facts, a8 };
+    let changes = [];
+    try { changes = await rows(db.from("threads_fact_changes").select("id,fact_id,status").eq("status", "pending"), "threads_fact_changes"); } catch { /* なくても他は見せる */ }
+    threads = { drafts, posted, metrics, facts, a8, changes };
   } catch { /* 表示できなくても他は見せる */ }
   let scheduler = null;
   try {
@@ -261,7 +263,10 @@ function viewHome() {
     `<div class="item"><a class="link" href="#kdp">KDP →</a><div class="meta">進行中・未着手の仕事 ${kdpOpen.length}件</div></div>` +
     `<div class="item"><a class="link" href="#sumaho">スマホ代ラボ →</a><div class="meta">${esc(publishMode())}・${esc(sumahoLine)}</div></div>`;
 
+  let office = "";
+  try { office = window.renderOffice ? window.renderOffice(data) : ""; } catch (e) { office = ""; console.error(e); }
   return (
+    office +
     card("承認", approvalBody) +
     card("要対応（質問・指示・通知）", todoCount ? todo : `<div class="empty">今、ボスがやることはありません</div>`, todoCount) +
     card("事業部", divisions) +
