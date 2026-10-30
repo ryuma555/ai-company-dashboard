@@ -260,19 +260,30 @@ function viewHome() {
     ? todayDrafts.map((d) => `${SLOT[d.slot]}：${DRAFT_STATUS[d.status] ?? d.status}`).join("／")
     : "今日の下書きはまだありません（毎朝5:00に作ります）";
   const divisions =
-    `<div class="item"><a class="link" href="#kdp">KDP →</a><div class="meta">進行中・未着手の仕事 ${kdpOpen.length}件</div></div>` +
-    `<div class="item"><a class="link" href="#sumaho">スマホ代ラボ →</a><div class="meta">${esc(publishMode())}・${esc(sumahoLine)}</div></div>`;
+    `<div class="item"><a class="link" href="#biz/kdp">KDP →</a><div class="meta">進行中・未着手の仕事 ${kdpOpen.length}件</div></div>` +
+    `<div class="item"><a class="link" href="#biz/sumaho">スマホ代ラボ →</a><div class="meta">${esc(publishMode())}・${esc(sumahoLine)}</div></div>`;
 
-  let office = "";
-  try { office = window.renderOffice ? window.renderOffice(data) : ""; } catch (e) { office = ""; console.error(e); }
   return (
-    office +
     card("承認", approvalBody) +
     card("要対応（質問・指示・通知）", todoCount ? todo : `<div class="empty">今、ボスがやることはありません</div>`, todoCount) +
     card("事業部", divisions) +
     card("稼働状況", statusBody) +
     card("費用（AI・会社全体）", costBody + `<div class="small"><a class="link" href="#cost">事業部ごと・くわしく見る →</a></div>`)
   );
+}
+
+// ---------- オフィス（会社の見取り図） ----------
+function viewOffice() {
+  let office = "";
+  try { office = window.renderOffice ? window.renderOffice(data) : ""; } catch (e) { console.error(e); }
+  return office || card("オフィス", `<div class="empty">表示できませんでした</div>`);
+}
+
+// ---------- 事業（KDP・スマホ代ラボを切り替え） ----------
+function viewBiz(sub = "kdp") {
+  const seg = [["kdp", "KDP"], ["sumaho", "スマホ代ラボ"]];
+  const nav = `<div class="segment">${seg.map(([k, l]) => `<a href="#biz/${k}" class="${k === sub ? "active" : ""}">${l}</a>`).join("")}</div>`;
+  return nav + (sub === "sumaho" ? viewSumaho() : viewKdp());
 }
 
 // ---------- 事業部：KDP ----------
@@ -370,7 +381,7 @@ async function viewArtifact(id) {
     ? card("要点", `<div class="md">${md(`**やったこと**\n\n${r.did}\n\n**分かったこと**\n\n${r.findings}` +
         (r.issues ? `\n\n**問題**\n\n${r.issues}` : "") + (r.proposals ? `\n\n**提案**\n\n${r.proposals}` : ""))}</div>`)
     : "";
-  return `<p><a class="link" href="#kdp">← KDPに戻る</a></p>` +
+  return `<p><a class="link" href="#biz/kdp">← KDPに戻る</a></p>` +
     card(a.title, `<div class="meta small">${fmt(a.created_at)}</div>`) + summary +
     card("本文", `<div class="md">${md(a.content)}</div>`);
 }
@@ -447,12 +458,14 @@ function viewCost() {
 // ---------- 画面の切り替え ----------
 async function render() {
   const [tab, arg] = (location.hash.replace("#", "") || "home").split("/");
-  document.querySelectorAll(".tabs a").forEach((a) => a.classList.toggle("active", a.dataset.tab === (tab === "artifact" || tab === "artifacts" ? "kdp" : tab)));
+  const TAB_OF = { artifact: "biz", artifacts: "biz", kdp: "biz", sumaho: "biz" };
+  document.querySelectorAll(".tabs a").forEach((a) => a.classList.toggle("active", a.dataset.tab === (TAB_OF[tab] ?? tab)));
   const view = $("#view");
   try {
     if (!data) await load();
-    if (tab === "kdp") view.innerHTML = viewKdp();
-    else if (tab === "sumaho") view.innerHTML = viewSumaho();
+    if (tab === "office") view.innerHTML = viewOffice();
+    else if (tab === "biz") view.innerHTML = viewBiz(arg);
+    else if (tab === "kdp" || tab === "sumaho") view.innerHTML = viewBiz(tab); // 前の住所（#kdp・#sumaho）も開けるように
     else if (tab === "artifacts") view.innerHTML = viewArtifacts();
     else if (tab === "artifact") view.innerHTML = await viewArtifact(arg);
     else if (tab === "history") view.innerHTML = viewHistory(arg);

@@ -131,12 +131,12 @@
     return [
       { title: "CEO室", href: "#home", color: "#5b4a7a", plant: true,
         workers: [sleepAll({ name: "CEO", hair: "#2b2b2b", shirt: "#2f3e66", ...ceo })] },
-      { title: "KDP（本）", href: "#kdp", color: "#2f6f73", board: [`今月 ${yen(kdpCost)}／${yen(kdpCap)}`],
+      { title: "KDP（本）", href: "#biz/kdp", color: "#2f6f73", board: [`今月 ${yen(kdpCost)}／${yen(kdpCap)}`],
         workers: [
           sleepAll({ name: d.deptName.analysis || "分析部門", hair: "#6b3d1f", shirt: "#d98c3b", ...deptState("analysis") }),
           sleepAll({ name: d.deptName.planning || "企画部門", hair: "#1f1f1f", shirt: "#3b82f6", ...deptState("planning") }),
         ] },
-      { title: "スマホ代ラボ（Threads）", href: "#sumaho", color: "#1f7a5c",
+      { title: "スマホ代ラボ（Threads）", href: "#biz/sumaho", color: "#1f7a5c",
         board: [`今日：${todays.map((x) => `${x.slot === "noon" ? "昼" : "夜"} ${label[x.status] || x.status}`).join("・") || "まだ"}`, `今月 ${yen(thCost)}／${yen(thCap)}${publishOn ? "" : "・練習期間"}`],
         workers: [
           sleepAll({ name: "調査・分析", hair: "#a0522d", shirt: "#8e5cd9", ...research }),
