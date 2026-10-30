@@ -75,3 +75,5 @@ pre.report { white-space: pre-wrap; word-break: break-word; font: inherit; font-
 
 .meta.urgent { color: var(--bad); font-weight: 600; }
 .subhead { font-size: 13px; font-weight: 700; margin: 12px 0 2px; color: var(--warn); }
+img.thumb { display: block; width: 100%; max-width: 360px; border-radius: 12px; margin: 8px 0; border: 1px solid var(--line); }
+.tabs a { font-size: 13px; }

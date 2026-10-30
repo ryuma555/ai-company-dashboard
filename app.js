@@ -28,7 +28,14 @@ const INSTR_STATUS = { new: "未処理", applied: "反映済み", needs_clarific
 const PURPOSE = {
   ceo_plan: "CEOの計画", dept_task: "部門の仕事", dept_research: "検索ありの調査", morning_narrative: "朝の報告",
   weekly_review: "週の振り返り", search_test: "検索の試験",
+  threads_draft: "投稿の下書き", threads_qa: "投稿のチェック",
 };
+const BIZ_LABEL = { kdp: "KDP", threads: "スマホ代ラボ", company: "全社（CEO・報告）" };
+const DRAFT_STATUS = {
+  draft: "下書き", qa_failed: "チェック不合格（お休み）", ready: "承認待ち", approved: "承認済み", rejected: "書き直し済み",
+  posted: "投稿済み", skipped: "見送り", failed: "投稿失敗",
+};
+const SLOT = { noon: "お昼 12:30", night: "夜 21:00" };
 // 定期実行の時刻（日本時間）。supabase/migrations/0005_scheduler.sql と同じ
 const SCHEDULE = [
   ["07:41", "朝の報告"], ["09:04", "CEOの計画"], ["11:04", "定期処理"], ["14:04", "定期処理"],
@@ -61,8 +68,8 @@ async function load() {
     notifications, artifacts, reports, decisions, businesses, policies] = await Promise.all([
     rows(db.from("settings").select("key,value"), "settings"),
     rows(db.from("system_state").select("key,value,updated_at"), "system_state"),
-    allRows(() => db.from("llm_usage").select("created_at,purpose,cost_yen,ok,web_searches").gte("created_at", since.toISOString()).order("created_at"), "llm_usage"),
-    rows(db.from("departments").select("key,name"), "departments"),
+    allRows(() => db.from("llm_usage").select("created_at,purpose,cost_yen,ok,web_searches,business_key").gte("created_at", since.toISOString()).order("created_at"), "llm_usage"),
+    rows(db.from("departments").select("key,name,business_key"), "departments"),
     rows(db.from("tasks").select("id,department_key,title,status,created_at,started_at,finished_at,last_error").in("status", ["queued", "running"]).order("created_at"), "tasks"),
     rows(db.from("tasks").select("id,department_key,title,status,created_at,finished_at,last_error").order("created_at", { ascending: false }).limit(60), "tasks"),
     rows(db.from("action_proposals").select("id,description,category,status,created_at").eq("status", "awaiting_owner"), "action_proposals"),
@@ -73,7 +80,7 @@ async function load() {
     rows(db.from("artifacts").select("id,task_id,title,created_at").order("created_at", { ascending: false }).limit(50), "artifacts"),
     rows(db.from("daily_reports").select("report_date,rendered,delivered_at,delivery_error").order("report_date", { ascending: false }).limit(14), "daily_reports"),
     rows(db.from("decisions").select("summary,rationale,created_at").order("created_at", { ascending: false }).limit(40), "decisions"),
-    rows(db.from("businesses").select("name,description,kpi,status"), "businesses"),
+    rows(db.from("businesses").select("name,description,kpi,status,key,monthly_budget_yen"), "businesses"),
     rows(db.from("policies").select("title,body,version,effective_from").is("effective_to", null).order("effective_from"), "policies"),
   ]);
   const expired = await rows(db.from("approvals").select("id,proposal_id,expires_at").eq("status", "expired")
@@ -85,6 +92,21 @@ async function load() {
   try {
     productionUpdates = await rows(db.from("production_updates").select("body,created_at").order("created_at", { ascending: false }).limit(30), "production_updates");
   } catch { /* 表がまだなくても他は見せる */ }
+  // スマホ代ラボ（Threads事業部）。表がまだなくても他は見せる
+  let threads = { drafts: [], posted: [], metrics: [], facts: [], a8: [] };
+  try {
+    const twoWeeks = jstDate(new Date(now.getTime() - 14 * 86400e3));
+    const [drafts, facts, a8] = await Promise.all([
+      rows(db.from("threads_drafts").select("id,for_date,slot,kind,body,link_url,status,qa_notes,image_url,posted_at,error,created_at").gte("for_date", twoWeeks).order("created_at", { ascending: false }), "threads_drafts"),
+      rows(db.from("threads_price_facts").select("carrier,plan,item,value_text,note,source_url,checked_at,valid_from,valid_to,status").eq("status", "active").order("carrier"), "threads_price_facts"),
+      rows(db.from("threads_a8_weekly").select("week_start,clicks,confirmed,reward_yen").order("week_start", { ascending: false }).limit(12), "threads_a8_weekly"),
+    ]);
+    const posted = drafts.filter((d) => d.status === "posted");
+    const metrics = posted.length
+      ? await rows(db.from("threads_metrics").select("draft_id,age_days,views,likes,replies,reposts,quotes,shares").in("draft_id", posted.map((d) => d.id)), "threads_metrics")
+      : [];
+    threads = { drafts, posted, metrics, facts, a8 };
+  } catch { /* 表示できなくても他は見せる */ }
   let scheduler = null;
   try {
     const { data: s } = await db.rpc("dashboard_scheduler");
@@ -97,7 +119,8 @@ async function load() {
   const taskById = Object.fromEntries(recentTasks.map((t) => [t.id, t]));
   data = { now, settings, st, usage, deptName, taskById, openTasks, recentTasks, proposals, approvals, questions,
     instructions, notifications, artifacts, reports, decisions, businesses, policies, scheduler,
-    productionUpdates,
+    productionUpdates, threads,
+    deptBiz: Object.fromEntries(depts.map((d) => [d.key, d.business_key || "kdp"])),
     expired: expired.map((a) => ({ a, p: expiredProposals.find((p) => p.id === a.proposal_id) })).filter((x) => x.p) };
   $("#updated").textContent = `最終更新 ${fmt(now.toISOString())}`;
 }
@@ -105,12 +128,28 @@ async function load() {
 const dept = (k) => data.deptName[k] ?? DEPT_FALLBACK[k] ?? k;
 const spendSince = (t) => data.usage.filter((u) => new Date(u.created_at) >= t).reduce((a, u) => a + Number(u.cost_yen), 0);
 
-// 予算（src/budget.ts と同じ考え方：上限は最大10,000円、AIに使えるのは (上限 − 固定費) × 停止ライン）
+// 予算（src/budget.ts と同じ考え方：上限は設定値（ボスが決めた最大20,000円まで）、AIに使えるのは (上限 − 固定費) × 停止ライン）
+const ABSOLUTE_CAP = 20000;
 function budget() {
   const s = data.settings;
-  const cap = Math.min(s.monthly_cap_yen || 10000, 10000);
+  const cap = Math.min(s.monthly_cap_yen || 10000, ABSOLUTE_CAP);
   const monthLimit = (cap - (s.fixed_monthly_costs_yen || 0)) * (s.stop_ratio || 0.8);
-  return { monthLimit, dailyCap: s.daily_cap_yen || 400, usdJpy: s.usd_jpy || 160 };
+  return { cap, monthLimit, dailyCap: s.daily_cap_yen || 400, usdJpy: s.usd_jpy || 160 };
+}
+
+/** 事業部ごとの今月の費用と上限（company＝全社） */
+function bizCost(key) {
+  const monthStart = jstMonthStart(data.now);
+  const spent = data.usage.filter((u) => new Date(u.created_at) >= monthStart && (u.business_key || "company") === key).reduce((a, u) => a + Number(u.cost_yen), 0);
+  const cap = key === "company" ? data.settings.company_budget_yen || 0 : data.businesses.find((b) => b.key === key)?.monthly_budget_yen || 0;
+  return { spent, cap };
+}
+function bizBar(key) {
+  const { spent, cap } = bizCost(key);
+  const pct = cap ? Math.min(100, (spent / cap) * 100) : 0;
+  const cls = cap && spent / cap >= 0.9 ? "bad" : cap && spent / cap >= 0.7 ? "warn" : "";
+  return `<div class="row"><span>${esc(BIZ_LABEL[key] ?? key)}</span><span>${yen(spent)}${cap ? ` / ${yen(cap)}` : ""}</span></div>` +
+    (cap ? `<div class="bar ${cls}"><div style="width:${pct}%"></div></div>` : "");
 }
 
 // Claude APIの残高（src/credit.ts と同じ計算）
@@ -212,19 +251,97 @@ function viewHome() {
      <div class="bar ${cls(month, b.monthLimit)}"><div style="width:${pct(month, b.monthLimit)}%"></div></div>` +
     (c ? `<div class="row"><span>Claude APIの残高（計算上）</span><span>約$${c.remainingUsd.toFixed(2)}（あと約${Math.floor(c.daysLeft)}日分）</span></div>` : "");
 
-  // 今日の動き
-  const todayStart = jstDayStart(now);
-  const finishedToday = data.recentTasks.filter((t) => t.finished_at && new Date(t.finished_at) >= todayStart);
-  const taskItem = (t) => `<div class="item"><span class="pill">${TASK_STATUS[t.status] ?? t.status}</span>${esc(t.title)}
-    <div class="meta">${esc(dept(t.department_key))}${t.last_error && t.status !== "done" ? `・${esc(t.last_error.slice(0, 100))}` : ""}</div></div>`;
+  // 事業部の様子（くわしくは各タブ）
+  const kdpOpen = data.openTasks.filter((t) => (data.deptBiz[t.department_key] || "kdp") === "kdp");
+  const todayDrafts = latestDrafts(jstDate(now));
+  const sumahoLine = todayDrafts.length
+    ? todayDrafts.map((d) => `${SLOT[d.slot]}：${DRAFT_STATUS[d.status] ?? d.status}`).join("／")
+    : "今日の下書きはまだありません（毎朝5:00に作ります）";
+  const divisions =
+    `<div class="item"><a class="link" href="#kdp">KDP →</a><div class="meta">進行中・未着手の仕事 ${kdpOpen.length}件</div></div>` +
+    `<div class="item"><a class="link" href="#sumaho">スマホ代ラボ →</a><div class="meta">${esc(publishMode())}・${esc(sumahoLine)}</div></div>`;
 
   return (
     card("承認", approvalBody) +
     card("要対応（質問・指示・通知）", todoCount ? todo : `<div class="empty">今、ボスがやることはありません</div>`, todoCount) +
+    card("事業部", divisions) +
     card("稼働状況", statusBody) +
-    card("費用（AI）", costBody + `<div class="small"><a class="link" href="#cost">くわしく見る →</a></div>`) +
-    card("進行中・未着手の仕事", list(data.openTasks, taskItem), data.openTasks.length) +
-    card("今日終わった仕事", list(finishedToday, taskItem), finishedToday.length)
+    card("費用（AI・会社全体）", costBody + `<div class="small"><a class="link" href="#cost">事業部ごと・くわしく見る →</a></div>`)
+  );
+}
+
+// ---------- 事業部：KDP ----------
+const taskItem = (t) => `<div class="item"><span class="pill">${TASK_STATUS[t.status] ?? t.status}</span>${esc(t.title)}
+  <div class="meta">${t.finished_at ? fmt(t.finished_at) : fmt(t.created_at)}・${esc(dept(t.department_key))}${t.last_error && t.status !== "done" ? `・${esc(t.last_error.slice(0, 100))}` : ""}</div></div>`;
+
+function viewKdp() {
+  const isKdp = (k) => (data.deptBiz[k] || "kdp") === "kdp";
+  const biz = data.businesses.find((b) => b.key === "kdp");
+  const open = data.openTasks.filter((t) => isKdp(t.department_key));
+  const recent = data.recentTasks.filter((t) => isKdp(t.department_key) && t.status !== "queued" && t.status !== "running").slice(0, 15);
+  const arts = data.artifacts.filter((a) => { const t = data.taskById[a.task_id]; return !t || isKdp(t.department_key); });
+  return (
+    (biz ? card("KDP（Amazonの本）", `<details class="item"><summary>事業の内容と目標</summary><pre class="report">${esc(biz.description)}\n\n目標：${esc(biz.kpi)}</pre></details>`) : "") +
+    card("費用（今月）", bizBar("kdp")) +
+    card("進行中・未着手の仕事", list(open, taskItem), open.length) +
+    card("成果物", list(arts.slice(0, 20), (a) => {
+      const t = data.taskById[a.task_id];
+      return `<div class="item"><a class="link" href="#artifact/${a.id}">${esc(a.title)}</a>
+        <div class="meta">${fmt(a.created_at)}${t ? `・${esc(dept(t.department_key))}` : ""}</div></div>`;
+    }, "まだありません"), arts.length) +
+    card("最近終わった仕事", list(recent, taskItem), recent.length)
+  );
+}
+
+// ---------- 事業部：スマホ代ラボ（Threads） ----------
+function publishMode() {
+  return data.st.threads_publish_enabled === true ? "本番（承認した投稿を自動で投稿）" : "練習期間（承認しても投稿しない）";
+}
+/** その日の枠ごとの最新の下書き */
+function latestDrafts(date) {
+  const out = [];
+  for (const slot of ["noon", "night"]) {
+    const d = data.threads.drafts.filter((x) => x.for_date === date && x.slot === slot).sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+    if (d) out.push(d);
+  }
+  return out;
+}
+function draftItem(d, withImage) {
+  const m = data.threads.metrics.filter((x) => x.draft_id === d.id).sort((a, b) => b.age_days - a.age_days)[0];
+  return `<details class="item"${withImage ? " open" : ""}><summary><span class="pill">${esc(DRAFT_STATUS[d.status] ?? d.status)}</span>${esc(d.for_date.slice(5).replace("-", "/"))} ${esc(SLOT[d.slot] ?? d.slot)}
+      ${m ? `<span class="muted small">　表示 ${m.views}・いいね ${m.likes}・返信 ${m.replies}（${m.age_days}日後）</span>` : ""}</summary>
+    ${withImage && d.image_url ? `<img class="thumb" src="${esc(d.image_url)}" alt="" loading="lazy">` : ""}
+    <pre class="report">${esc(d.body)}${d.link_url ? `\n${esc(d.link_url)}` : ""}</pre>
+    ${d.qa_notes ? `<div class="meta">チェックの指摘：${esc(d.qa_notes)}</div>` : ""}${d.error ? `<div class="meta urgent">${esc(d.error)}</div>` : ""}</details>`;
+}
+
+function viewSumaho() {
+  const t = data.threads;
+  const today = jstDate(data.now);
+  const status = data.st.threads_publish_enabled === true
+    ? `<div class="status ok"><b>本番</b>承認した投稿だけを、12:30と21:00に自動で投稿します</div>`
+    : `<div class="status warn"><b>練習期間</b>朝のLINEのカードで承認しても、自動では投稿しません</div>`;
+  const latest = t.posted.map((d) => t.metrics.filter((m) => m.draft_id === d.id).sort((a, b) => b.age_days - a.age_days)[0]).filter(Boolean);
+  const sum = (k) => latest.reduce((a, m) => a + (m[k] || 0), 0);
+  const perf = t.posted.length
+    ? `<div class="row"><span>投稿数（直近14日）</span><span>${t.posted.length}本</span></div>
+       <div class="row"><span>表示回数（合計）</span><span>${sum("views").toLocaleString("ja-JP")}</span></div>
+       <div class="row"><span>いいね・返信・再投稿</span><span>${sum("likes")}・${sum("replies")}・${sum("reposts")}</span></div>`
+    : `<div class="empty">まだ投稿はありません</div>`;
+  const stale = (f) => (data.now.getTime() - new Date(`${f.checked_at}T00:00:00+09:00`).getTime()) / 86400e3 > 7;
+  const facts = list(t.facts, (f) => `<div class="item"><b>${esc(f.carrier)}</b> ${esc(f.plan)}：${esc(f.item)} <b>${esc(f.value_text)}</b>
+    <div class="meta${stale(f) ? " urgent" : ""}">確認日 ${esc(f.checked_at)}${stale(f) ? "（7日を過ぎたので投稿には使わない）" : ""}${f.note ? `・${esc(f.note)}` : ""}・<a class="link" href="${esc(f.source_url)}" target="_blank" rel="noopener">公式ページ</a></div></div>`,
+    "まだありません（公式ページで確認できた料金を、確認日つきで入れていきます）");
+  const a8 = list(t.a8, (w) => `<div class="row"><span>${esc(w.week_start)}の週</span><span>${w.confirmed ?? "-"}件・${w.reward_yen != null ? yen(w.reward_yen) : "-"}</span></div>`, "まだ記録はありません");
+  return (
+    card("スマホ代ラボ（Threads @sumahodai_labo）", status +
+      `<div class="small"><a class="link" href="https://sumahodai-lab.com" target="_blank" rel="noopener">サイトを開く</a>　<a class="link" href="https://www.threads.net/@sumahodai_labo" target="_blank" rel="noopener">Threadsを開く</a></div>`) +
+    card("今日の投稿", list(latestDrafts(today), (d) => draftItem(d, true), "まだありません（毎朝5:00に作ります）")) +
+    card("成績", perf) +
+    card("費用（今月）", bizBar("threads")) +
+    card("最近の投稿・下書き（14日）", list(t.drafts.filter((d) => d.for_date !== today).slice(0, 30), (d) => draftItem(d, false), "まだありません")) +
+    card("料金の一覧表", facts, t.facts.length) +
+    card("A8の成果（週ごと・ボスが送った合計）", a8)
   );
 }
 
@@ -248,7 +365,7 @@ async function viewArtifact(id) {
     ? card("要点", `<div class="md">${md(`**やったこと**\n\n${r.did}\n\n**分かったこと**\n\n${r.findings}` +
         (r.issues ? `\n\n**問題**\n\n${r.issues}` : "") + (r.proposals ? `\n\n**提案**\n\n${r.proposals}` : ""))}</div>`)
     : "";
-  return `<p><a class="link" href="#artifacts">← 成果物の一覧</a></p>` +
+  return `<p><a class="link" href="#kdp">← KDPに戻る</a></p>` +
     card(a.title, `<div class="meta small">${fmt(a.created_at)}</div>`) + summary +
     card("本文", `<div class="md">${md(a.content)}</div>`);
 }
@@ -304,6 +421,8 @@ function viewCost() {
   const c = credit();
 
   return (
+    card("事業部ごとの今月の費用", bizBar("kdp") + bizBar("threads") + bizBar("company") +
+      `<div class="small muted">事業部ごとに上限があり、超えるとその事業部のAIだけが止まります</div>`) +
     card("直近14日の費用（AI）", chart) +
     card("今月", `<div class="row"><span>使った額</span><span>${yen(month)} / ${yen(b.monthLimit)}</span></div>
       <div class="row"><span>失敗でムダになった額</span><span>${yen(waste)}</span></div>
@@ -313,7 +432,8 @@ function viewCost() {
       <div class="row"><span>最近の使用ペース</span><span>1日 約$${c.burnUsd.toFixed(2)}</span></div>
       <div class="row"><span>あと</span><span>約${Math.floor(c.daysLeft)}日分</span></div>
       <div class="small muted">Consoleの表示とずれたら、LINEで「残高 25.5」のように送ると合わせられます</div>`) : "") +
-    card("月の上限", `<div class="row"><span>運用費の上限（絶対）</span><span>${yen(Math.min(data.settings.monthly_cap_yen || 10000, 10000))}</span></div>
+    card("月の上限", `<div class="row"><span>運用費の上限（会社全体）</span><span>${yen(b.cap)}</span></div>
+      <div class="small muted">ボスが決めた最大は${yen(ABSOLUTE_CAP)}。上げるときは事前に確認します</div>
       <div class="row"><span>AIに使える上限</span><span>${yen(b.monthLimit)}</span></div>
       <div class="row"><span>1日の上限</span><span>${yen(b.dailyCap)}</span></div>`)
   );
@@ -322,11 +442,13 @@ function viewCost() {
 // ---------- 画面の切り替え ----------
 async function render() {
   const [tab, arg] = (location.hash.replace("#", "") || "home").split("/");
-  document.querySelectorAll(".tabs a").forEach((a) => a.classList.toggle("active", a.dataset.tab === (tab === "artifact" ? "artifacts" : tab)));
+  document.querySelectorAll(".tabs a").forEach((a) => a.classList.toggle("active", a.dataset.tab === (tab === "artifact" || tab === "artifacts" ? "kdp" : tab)));
   const view = $("#view");
   try {
     if (!data) await load();
-    if (tab === "artifacts") view.innerHTML = viewArtifacts();
+    if (tab === "kdp") view.innerHTML = viewKdp();
+    else if (tab === "sumaho") view.innerHTML = viewSumaho();
+    else if (tab === "artifacts") view.innerHTML = viewArtifacts();
     else if (tab === "artifact") view.innerHTML = await viewArtifact(arg);
     else if (tab === "history") view.innerHTML = viewHistory(arg);
     else if (tab === "cost") view.innerHTML = viewCost();
